@@ -286,3 +286,82 @@
 (define-read-only (get-current-product-id)
   (var-get next-product-id)
 )
+
+(define-map product-ratings
+  {
+    product-id: uint,
+    rating-id: uint,
+  }
+  {
+    rating: uint,
+    review: (string-ascii 200),
+    reviewer: principal,
+    stage: (string-ascii 50),
+    timestamp: uint,
+  }
+)
+
+(define-map product-rating-count
+  { product-id: uint }
+  { count: uint }
+)
+
+(define-map product-rating-totals
+  { product-id: uint }
+  { total: uint }
+)
+
+(define-public (rate-product
+    (product-id uint)
+    (rating uint)
+    (review (string-ascii 200))
+  )
+  (let (
+      (product (unwrap! (map-get? products { product-id: product-id }) err-not-found))
+      (rating-count-data (default-to { count: u0 } (map-get? product-rating-count { product-id: product-id })))
+      (rating-total-data (default-to { total: u0 } (map-get? product-rating-totals { product-id: product-id })))
+      (current-count (get count rating-count-data))
+      (current-total (get total rating-total-data))
+      (new-count (+ current-count u1))
+      (new-total (+ current-total rating))
+    )
+    (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-stage)
+    (map-set product-ratings {
+      product-id: product-id,
+      rating-id: new-count,
+    } {
+      rating: rating,
+      review: review,
+      reviewer: tx-sender,
+      stage: (get current-stage product),
+      timestamp: stacks-block-height,
+    })
+    (map-set product-rating-count { product-id: product-id } { count: new-count })
+    (map-set product-rating-totals { product-id: product-id } { total: new-total })
+    (ok new-count)
+  )
+)
+
+(define-read-only (get-product-rating (product-id uint) (rating-id uint))
+  (map-get? product-ratings { product-id: product-id, rating-id: rating-id })
+)
+
+(define-read-only (get-average-rating (product-id uint))
+  (let (
+      (count-data (map-get? product-rating-count { product-id: product-id }))
+      (total-data (map-get? product-rating-totals { product-id: product-id }))
+    )
+    (if (and (is-some count-data) (is-some total-data))
+      (let (
+          (count (get count (unwrap-panic count-data)))
+          (total (get total (unwrap-panic total-data)))
+        )
+        (if (> count u0)
+          (some (/ total count))
+          none
+        )
+      )
+      none
+    )
+  )
+)
