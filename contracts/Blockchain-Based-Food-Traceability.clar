@@ -365,3 +365,91 @@
     )
   )
 )
+
+(define-data-var next-batch-id uint u1)
+
+(define-map batches
+  { batch-id: uint }
+  {
+    name: (string-ascii 100),
+    created-by: principal,
+    created-at: uint,
+    current-stage: (string-ascii 50),
+    product-count: uint,
+    is-active: bool,
+  }
+)
+
+(define-map batch-products
+  {
+    batch-id: uint,
+    product-id: uint,
+  }
+  { included: bool }
+)
+
+(define-private (check-product-exists (product-id uint))
+  (is-some (map-get? products { product-id: product-id }))
+)
+
+(define-private (add-products-to-batch-fold (product-id uint) (batch-id uint))
+  (begin
+    (map-set batch-products { batch-id: batch-id, product-id: product-id } { included: true })
+    batch-id
+  )
+)
+
+(define-public (create-batch
+    (name (string-ascii 100))
+    (product-ids (list 20 uint))
+  )
+  (let (
+      (batch-id (var-get next-batch-id))
+      (valid-products (filter check-product-exists product-ids))
+    )
+    (asserts! (> (len valid-products) u0) err-not-found)
+    (map-set batches { batch-id: batch-id } {
+      name: name,
+      created-by: tx-sender,
+      created-at: stacks-block-height,
+      current-stage: "batch-created",
+      product-count: (len valid-products),
+      is-active: true,
+    })
+    (fold add-products-to-batch-fold valid-products batch-id)
+    (var-set next-batch-id (+ batch-id u1))
+    (ok batch-id)
+  )
+)
+
+(define-public (update-batch-stage
+    (batch-id uint)
+    (new-stage (string-ascii 50))
+    (location (string-ascii 100))
+    (notes (string-ascii 200))
+  )
+  (let ((batch (unwrap! (map-get? batches { batch-id: batch-id }) err-not-found)))
+    (asserts! (get is-active batch) err-invalid-stage)
+    (asserts! (is-eq tx-sender (get created-by batch)) err-unauthorized)
+    (map-set batches { batch-id: batch-id }
+      (merge batch { current-stage: new-stage })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-batch (batch-id uint))
+  (map-get? batches { batch-id: batch-id })
+)
+
+(define-read-only (is-product-in-batch (batch-id uint) (product-id uint))
+  (default-to false
+    (get included
+      (map-get? batch-products { batch-id: batch-id, product-id: product-id })
+    )
+  )
+)
+
+(define-read-only (get-current-batch-id)
+  (var-get next-batch-id)
+)
