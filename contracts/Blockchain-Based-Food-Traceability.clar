@@ -5,6 +5,12 @@
 (define-constant err-invalid-stage (err u103))
 (define-constant err-already-exists (err u104))
 
+(define-constant err-alert-exists (err u105))
+(define-constant err-alert-not-found (err u106))
+(define-constant err-alert-resolved (err u107))
+
+(define-data-var next-alert-id uint u1)
+
 (define-data-var next-product-id uint u1)
 
 (define-map products
@@ -452,4 +458,120 @@
 
 (define-read-only (get-current-batch-id)
   (var-get next-batch-id)
+)
+
+(define-map quality-alerts
+  { alert-id: uint }
+  {
+    product-id: (optional uint),
+    batch-id: (optional uint),
+    alert-type: (string-ascii 50),
+    severity: uint,
+    description: (string-ascii 300),
+    issued-by: principal,
+    issued-at: uint,
+    is-resolved: bool,
+    resolved-at: (optional uint),
+    resolved-by: (optional principal),
+    affected-stages: (string-ascii 200),
+  }
+)
+
+(define-map product-alerts
+  { product-id: uint }
+  { active-alerts: uint }
+)
+
+(define-map batch-alerts
+  { batch-id: uint }
+  { active-alerts: uint }
+)
+
+(define-public (issue-quality-alert
+    (product-id (optional uint))
+    (batch-id (optional uint))
+    (alert-type (string-ascii 50))
+    (severity uint)
+    (description (string-ascii 300))
+    (affected-stages (string-ascii 200))
+  )
+  (let (
+      (alert-id (var-get next-alert-id))
+      (handler-auth (map-get? authorized-handlers { handler: tx-sender }))
+    )
+    (asserts!
+      (or
+        (is-eq tx-sender contract-owner)
+        (and
+          (is-some handler-auth)
+          (get authorized (unwrap-panic handler-auth))
+        )
+      )
+      err-unauthorized
+    )
+    (asserts! (and (>= severity u1) (<= severity u5)) err-invalid-stage)
+    (asserts! (or (is-some product-id) (is-some batch-id)) err-not-found)
+    
+    (map-set quality-alerts { alert-id: alert-id } {
+      product-id: product-id,
+      batch-id: batch-id,
+      alert-type: alert-type,
+      severity: severity,
+      description: description,
+      issued-by: tx-sender,
+      issued-at: stacks-block-height,
+      is-resolved: false,
+      resolved-at: none,
+      resolved-by: none,
+      affected-stages: affected-stages,
+    })
+    
+    (match product-id
+      pid (let ((current-alerts (default-to { active-alerts: u0 }
+                                  (map-get? product-alerts { product-id: pid }))))
+             (map-set product-alerts { product-id: pid }
+               { active-alerts: (+ (get active-alerts current-alerts) u1) }))
+      true)
+    
+    (match batch-id
+      bid (let ((current-alerts (default-to { active-alerts: u0 }
+                                  (map-get? batch-alerts { batch-id: bid }))))
+             (map-set batch-alerts { batch-id: bid }
+               { active-alerts: (+ (get active-alerts current-alerts) u1) }))
+      true)
+    
+    (var-set next-alert-id (+ alert-id u1))
+    (ok alert-id)
+  )
+)
+
+(define-public (resolve-quality-alert (alert-id uint))
+  (let ((alert (unwrap! (map-get? quality-alerts { alert-id: alert-id }) err-alert-not-found)))
+    (asserts! (not (get is-resolved alert)) err-alert-resolved)
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    (map-set quality-alerts { alert-id: alert-id }
+      (merge alert {
+        is-resolved: true,
+        resolved-at: (some stacks-block-height),
+        resolved-by: (some tx-sender),
+      }))
+    (ok true)
+  )
+)
+
+(define-read-only (get-quality-alert (alert-id uint))
+  (map-get? quality-alerts { alert-id: alert-id })
+)
+
+(define-read-only (get-product-alert-count (product-id uint))
+  (default-to u0 (get active-alerts (map-get? product-alerts { product-id: product-id })))
+)
+
+(define-read-only (get-batch-alert-count (batch-id uint))
+  (default-to u0 (get active-alerts (map-get? batch-alerts { batch-id: batch-id })))
+)
+
+(define-read-only (has-active-alerts (product-id uint))
+  (> (get-product-alert-count product-id) u0)
 )
