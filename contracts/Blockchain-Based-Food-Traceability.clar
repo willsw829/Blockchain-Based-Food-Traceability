@@ -575,3 +575,133 @@
 (define-read-only (has-active-alerts (product-id uint))
   (> (get-product-alert-count product-id) u0)
 )
+
+
+(define-data-var next-recall-id uint u1)
+
+(define-map product-recalls
+  { recall-id: uint }
+  {
+    product-id: (optional uint),
+    batch-id: (optional uint),
+    recall-reason: (string-ascii 300),
+    severity-level: uint,
+    initiated-by: principal,
+    initiated-at: uint,
+    affected-quantity: uint,
+    recovered-quantity: uint,
+    is-completed: bool,
+    completion-date: (optional uint),
+    regulatory-body: (string-ascii 100),
+  }
+)
+
+(define-map recall-status
+  {
+    recall-id: uint,
+    responder: principal,
+  }
+  {
+    units-recovered: uint,
+    response-timestamp: uint,
+    response-notes: (string-ascii 200),
+  }
+)
+
+(define-public (initiate-recall
+    (product-id (optional uint))
+    (batch-id (optional uint))
+    (recall-reason (string-ascii 300))
+    (severity-level uint)
+    (affected-quantity uint)
+    (regulatory-body (string-ascii 100))
+  )
+  (let (
+      (recall-id (var-get next-recall-id))
+      (handler-auth (map-get? authorized-handlers { handler: tx-sender }))
+    )
+    (asserts!
+      (or
+        (is-eq tx-sender contract-owner)
+        (and
+          (is-some handler-auth)
+          (get authorized (unwrap-panic handler-auth))
+        )
+      )
+      err-unauthorized
+    )
+    (asserts! (and (>= severity-level u1) (<= severity-level u5)) err-invalid-stage)
+    (asserts! (or (is-some product-id) (is-some batch-id)) err-not-found)
+    (map-set product-recalls { recall-id: recall-id } {
+      product-id: product-id,
+      batch-id: batch-id,
+      recall-reason: recall-reason,
+      severity-level: severity-level,
+      initiated-by: tx-sender,
+      initiated-at: stacks-block-height,
+      affected-quantity: affected-quantity,
+      recovered-quantity: u0,
+      is-completed: false,
+      completion-date: none,
+      regulatory-body: regulatory-body,
+    })
+    (var-set next-recall-id (+ recall-id u1))
+    (ok recall-id)
+  )
+)
+
+(define-public (update-recall-recovery
+    (recall-id uint)
+    (units-recovered uint)
+    (response-notes (string-ascii 200))
+  )
+  (let ((recall (unwrap! (map-get? product-recalls { recall-id: recall-id }) err-not-found)))
+    (asserts! (not (get is-completed recall)) err-alert-resolved)
+    (map-set recall-status {
+      recall-id: recall-id,
+      responder: tx-sender,
+    } {
+      units-recovered: units-recovered,
+      response-timestamp: stacks-block-height,
+      response-notes: response-notes,
+    })
+    (map-set product-recalls { recall-id: recall-id }
+      (merge recall {
+        recovered-quantity: (+ (get recovered-quantity recall) units-recovered)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (complete-recall (recall-id uint))
+  (let ((recall (unwrap! (map-get? product-recalls { recall-id: recall-id }) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (get is-completed recall)) err-alert-resolved)
+    (map-set product-recalls { recall-id: recall-id }
+      (merge recall {
+        is-completed: true,
+        completion-date: (some stacks-block-height),
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-recall (recall-id uint))
+  (map-get? product-recalls { recall-id: recall-id })
+)
+
+(define-read-only (get-recall-response (recall-id uint) (responder principal))
+  (map-get? recall-status { recall-id: recall-id, responder: responder })
+)
+
+(define-read-only (get-recall-completion-rate (recall-id uint))
+  (match (map-get? product-recalls { recall-id: recall-id })
+    recall (if (> (get affected-quantity recall) u0)
+      (some (/ (* (get recovered-quantity recall) u100) (get affected-quantity recall)))
+      none
+    )
+    none
+  )
+)
