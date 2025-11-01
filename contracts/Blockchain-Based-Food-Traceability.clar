@@ -9,6 +9,9 @@
 (define-constant err-alert-not-found (err u106))
 (define-constant err-alert-resolved (err u107))
 
+(define-constant seconds-per-day u144)
+(define-constant days-warning-threshold u3)
+
 (define-data-var next-alert-id uint u1)
 
 (define-data-var next-product-id uint u1)
@@ -703,5 +706,98 @@
       none
     )
     none
+  )
+)
+
+(define-map product-expiration
+  { product-id: uint }
+  {
+    production-date: uint,
+    expiration-date: uint,
+    shelf-life-days: uint,
+    set-by: principal,
+    last-updated: uint,
+    extension-count: uint,
+  }
+)
+
+(define-public (set-product-expiration
+    (product-id uint)
+    (shelf-life-days uint)
+  )
+  (let (
+      (product (unwrap! (map-get? products { product-id: product-id }) err-not-found))
+      (handler-auth (map-get? authorized-handlers { handler: tx-sender }))
+      (production-date stacks-block-height)
+      (expiration-date (+ production-date (* shelf-life-days seconds-per-day)))
+    )
+    (asserts!
+      (or
+        (is-eq tx-sender (get producer product))
+        (and
+          (is-some handler-auth)
+          (get authorized (unwrap-panic handler-auth))
+        )
+      )
+      err-unauthorized
+    )
+    (ok (map-set product-expiration { product-id: product-id } {
+      production-date: production-date,
+      expiration-date: expiration-date,
+      shelf-life-days: shelf-life-days,
+      set-by: tx-sender,
+      last-updated: stacks-block-height,
+      extension-count: u0,
+    }))
+  )
+)
+
+(define-public (extend-shelf-life
+    (product-id uint)
+    (additional-days uint)
+  )
+  (let ((expiration-data (unwrap! (map-get? product-expiration { product-id: product-id }) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= additional-days u7) err-invalid-stage)
+    (ok (map-set product-expiration { product-id: product-id }
+      (merge expiration-data {
+        expiration-date: (+ (get expiration-date expiration-data) (* additional-days seconds-per-day)),
+        extension-count: (+ (get extension-count expiration-data) u1),
+        last-updated: stacks-block-height,
+      })
+    ))
+  )
+)
+
+(define-read-only (get-expiration-info (product-id uint))
+  (map-get? product-expiration { product-id: product-id })
+)
+
+(define-read-only (is-product-expired (product-id uint))
+  (match (map-get? product-expiration { product-id: product-id })
+    expiration-data (>= stacks-block-height (get expiration-date expiration-data))
+    false
+  )
+)
+
+(define-read-only (is-near-expiration (product-id uint))
+  (match (map-get? product-expiration { product-id: product-id })
+    expiration-data (let ((blocks-until-expiry (- (get expiration-date expiration-data) stacks-block-height)))
+      (and
+        (< stacks-block-height (get expiration-date expiration-data))
+        (<= blocks-until-expiry (* days-warning-threshold seconds-per-day))
+      )
+    )
+    false
+  )
+)
+
+(define-read-only (get-freshness-status (product-id uint))
+  (if (is-product-expired product-id)
+    "expired"
+    (if (is-near-expiration product-id)
+      "near-expiration"
+      "fresh"
+    )
   )
 )
